@@ -4,10 +4,48 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+// IsAPIRequest checks if the given URI is an API request
+func IsAPIRequest(uri string) bool {
+	return strings.HasPrefix(uri, "/api")
+}
+
+func fileExists(filename string) bool {
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
+}
+
+func handleApis(req *Request) *Response {
+	resp := createTextResponse(200, "Request Path: "+req.Path)
+	return resp
+}
+
+func handleStaticFiles(req *Request) *Response {
+	if req.Method != "GET" {
+		return createTextResponse(500, "Not Implemented Yet!")
+	}
+	fileName := filepath.Join("./www", req.Path)
+	if !fileExists("./www/" + req.Path) {
+		return createTextResponse(404, "File Doesn't Exist")
+	}
+	content, err := os.ReadFile(fileName)
+	if err != nil {
+		return createTextResponse(500, "Error reading file")
+	}
+
+	return createFileResponse(200, content)
+}
 
 // Custom Request struct
 type Request struct {
@@ -22,7 +60,7 @@ type Response struct {
 	StatusCode int
 	Status     string
 	Header     map[string]string
-	Body       string
+	Body       []byte
 }
 
 // Function to read a Request from a TCP connection
@@ -65,9 +103,10 @@ func readRequest(conn net.Conn) (*Request, error) {
 			if err == nil && length > 0 {
 				bodyBytes := make([]byte, length)
 				_, err = io.ReadFull(reader, bodyBytes)
-				if err == nil {
-					body = string(bodyBytes)
+				if err != nil {
+					return nil, err
 				}
+				body = string(bodyBytes)
 			}
 		}
 	}
@@ -75,8 +114,24 @@ func readRequest(conn net.Conn) (*Request, error) {
 	return &Request{Method: method, Path: path, Header: header, Body: body}, nil
 }
 
+func createFileResponse(statusCode int, body []byte) *Response {
+	status := "OK"
+	if statusCode != 200 {
+		status = "Error"
+	}
+	contentType := http.DetectContentType(body)
+	log.Println("contentType", contentType)
+
+	return &Response{
+		StatusCode: statusCode,
+		Status:     status,
+		Header:     map[string]string{"Content-Type": contentType},
+		Body:       body,
+	}
+}
+
 // Function to create a Response
-func createResponse(statusCode int, body string) *Response {
+func createTextResponse(statusCode int, body string) *Response {
 	status := "OK"
 	if statusCode != 200 {
 		status = "Error"
@@ -85,7 +140,7 @@ func createResponse(statusCode int, body string) *Response {
 		StatusCode: statusCode,
 		Status:     status,
 		Header:     map[string]string{"Content-Type": "text/plain"},
-		Body:       body,
+		Body:       []byte(body),
 	}
 }
 
@@ -95,9 +150,10 @@ func writeResponse(conn net.Conn, resp *Response) error {
 	for key, value := range resp.Header {
 		header += fmt.Sprintf("%s: %s\r\n", key, value)
 	}
-	header += "\r\n" + resp.Body
+	header += "\r\n"
+	serializedPayload := append([]byte(header), resp.Body...)
 
-	_, err := conn.Write([]byte(header))
+	_, err := conn.Write(serializedPayload)
 	return err
 }
 
@@ -115,7 +171,13 @@ func handleConnection(conn net.Conn) {
 	}
 
 	// Create a response
-	resp := createResponse(200, "Hello, World!")
+	var resp *Response
+	if IsAPIRequest(req.Path) {
+		resp = handleApis(req)
+	} else {
+		resp = handleStaticFiles(req)
+	}
+
 	err = writeResponse(conn, resp)
 	if err != nil {
 		fmt.Println("Error writing response:", err)
